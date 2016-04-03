@@ -1,3 +1,17 @@
+/*
+open-dobot firmware that controls Dobot FPGA.
+
+Find driver and SDK at https://github.com/maxosprojects/open-dobot
+
+Author: maxosprojects (March 18 2016)
+Additional Authors: <put your name here>
+
+Version: 0.5.0
+
+License: MIT
+*/
+
+// #define DEBUG
 
 #define F_CPU 16000000UL
 #define BAUD 115200
@@ -29,18 +43,24 @@
 #define CMD_QUEUE_SIZE     200
 
 CommandQueue cmdQueue(CMD_QUEUE_SIZE);
+Calibrator calibrator;
 
 #define CMD_READY 0
 #define CMD_STEPS 1
 #define CMD_EXEC_QUEUE 2
 #define CMD_GET_ACCELS 3
 #define CMD_SWITCH_TO_ACCEL_REPORT_MODE 4
+#define CMD_CALIBRATE_JOINT 5
+#define CMD_EMERGENCY_STOP 6
 // DO NOT FORGET TO UPDATE cmdArray SIZE!
-funcPtrs cmdArray[5];
-// Last index in the commands array.
-int cmdLastIndex;
+funcPtrs cmdArray[7];
+// Last index in the commands pointers array.
+int cmdPtrArrayLastIndex;
 
+// Buffer to read command into.
 byte cmd[20];
+// Current index in command buffer.
+byte cmdInBuffIndex = 0;
 byte crc[2];
 
 // ulong lastTimeExecuted = 0;
@@ -56,7 +76,9 @@ void setup() {
   cmdArray[CMD_EXEC_QUEUE] = cmdExecQueue;
   cmdArray[CMD_GET_ACCELS] = cmdGetAccels;
   cmdArray[CMD_SWITCH_TO_ACCEL_REPORT_MODE] = cmdSwitchToAccelReportMode;
-  cmdLastIndex = sizeof(cmdArray) / sizeof(cmdArray[0]) - 1;
+  cmdArray[CMD_CALIBRATE_JOINT] = cmdCalibrateJoint;
+  cmdArray[CMD_EMERGENCY_STOP] = cmdEmergencyStop;
+  cmdPtrArrayLastIndex = sizeof(cmdArray) / sizeof(cmdArray[0]) - 1;
 
   serialInit();
 
@@ -131,61 +153,152 @@ void setup() {
 
   // Power-on step 12
   FPGA_ENABLE_PORT |= (1<<FPGA_ENABLE_PIN);
+
+#ifdef DEBUG
+  initDebug();
+#endif
+
 }
 
-void processCommand() {
-  // If something is waiting in the serial port to be read...
-  if (UCSR0A&(1<<RXC0)) {
-    // Get incoming byte.
-    cmd[0] = UDR0;
-    if ((accelReportMode && cmd[0] != CMD_GET_ACCELS) || cmd[0] > cmdLastIndex) {
-      return;
+inline byte processCommand() {
+  if (cmdInBuffIndex > 0) {
+    if ((accelReportMode && cmd[0] != CMD_GET_ACCELS) || cmd[0] > cmdPtrArrayLastIndex) {
+      cmdInBuffIndex = 0;
+      return 0;
     }
-    cmdArray[cmd[0]]();
+    return cmdArray[cmd[0]]();
+  }
+  return 0;
+}
+
+/*
+ * Processes whatever we have received in the cmd buffer so far.
+ * Allows to pick up and process more than one command in one FPGA window (~20ms).
+ * The number of iterations experimantally (with oscilloscope) selected to fit into
+ * FPGA window taking into account the number of serial reads and an average time one
+ * command takes to process.
+ * It is done this way to avoid interrupts, which would make it impossible to talk to
+ * FPGA as we would lose SPI clock ticks and there is no SPI transmit buffer (only receive).
+ */
+inline void processSerialBuffer() {
+  int iterationsLeft = 10000;
+  while (iterationsLeft > 0) {
+    if (processCommand()) {
+      iterationsLeft -= 1000;
+    } else {
+      iterationsLeft -= 1;
+    }
+    serialRead();
   }
 }
 
 // CMD: Returns magic number to indicate that the controller is alive.
-void cmdReady() {
-  serialWrite(1);
-  crcCcitt(cmd, 1);
+byte cmdReady() {
+  // Check if not enough bytes yet.
+  if (cmdInBuffIndex < 3) {
+    return 0;
+  }
+  cmdInBuffIndex = 0;
+  if (!checkCrc(cmd, 1)) {
+    return 0;
+  }
   // Return magic number.
   cmd[0] = 0x40;
   write1(cmd);
+  return 1;
 }
 
 // CMD: Adds a command to the queue.
-void cmdSteps() {
-  serialWrite(1);
-  if (!read13(&cmd[1])) {
-    return;
+byte cmdSteps() {
+  // Check if not enough bytes yet.
+  if (cmdInBuffIndex < 16) {
+    return 0;
   }
-  if (checkCrc(cmd, 14)) {
-    resetCrc();
-    if (cmdQueue.appendHead((ulong*) &cmd[1], (ulong*) &cmd[5], (ulong*) &cmd[9], &cmd[13])) {
-      cmd[0] = 1;
-      write1(cmd);
-    } else {
-      cmd[0] = 0;
-      write1(cmd);
-    }
+  cmdInBuffIndex = 0;
+  if (!checkCrc(cmd, 14)) {
+    return 0;
   }
+  if (cmdQueue.appendHead((ulong*) &cmd[1], (ulong*) &cmd[5], (ulong*) &cmd[9], &cmd[13])) {
+    cmd[0] = 1;
+  } else {
+    cmd[0] = 0;
+  }
+  write1(cmd);
+  return 1;
+}
+
+// CMD: Starts calibration routine.
+byte cmdCalibrateJoint() {
+  // Check if not enough bytes yet.
+  if (cmdInBuffIndex < 13) {
+    return 0;
+  }
+  cmdInBuffIndex = 0;
+  if (!checkCrc(cmd, 11)) {
+    return 0;
+  }
+  // The received command has the following structure:
+  // long - forward speed
+  // long - back speed
+  // byte - pin number
+  // byte - control structure: [1-0] - joint (#3 - illegal)
+  byte pin = cmd[9];
+  byte ctrl = cmd[10];
+  byte joint = ctrl & 0x03;
+  if (joint == 3) {
+    return 0;
+  }
+  cmdQueue.clear();
+  calibrator.start(pin, ctrl, (ulong*) &cmd[1], (ulong*) &cmd[5]);
+  write0();
+  return 1;
 }
 
 // CMD: Returns data read from accelerometers.
-void cmdGetAccels() {
-  serialWrite(1);
-  crcCcitt(cmd, 1);
+byte cmdGetAccels() {
+  // Check if not enough bytes yet.
+  if (cmdInBuffIndex < 3) {
+    return 0;
+  }
+  cmdInBuffIndex = 0;
+  if (!checkCrc(cmd, 1)) {
+    return 0;
+  }
   write22(cmd, &accelRear, &accelFront);
+  return 1;
+}
+
+// CMD: Stops the arm by clearing command buffer and stopping calibrator
+// Use in emergency
+byte cmdEmergencyStop() {
+  // Check if not enough bytes yet.
+  if (cmdInBuffIndex < 3) {
+    return 0;
+  }
+  cmdInBuffIndex = 0;
+  if (!checkCrc(cmd, 1)) {
+    return 0;
+  }
+  cmdQueue.clear();
+  calibrator.stop();
+  write0();
+  return 1;
 }
 
 // CMD: Executes deferred commands in the queue.
-void cmdExecQueue() {
+byte cmdExecQueue() {
+  // Check if not enough bytes yet.
+  if (cmdInBuffIndex < 3) {
+    return 0;
+  }
+  cmdInBuffIndex = 0;
+  crcCcitt(cmd, 1);
   defer = 0;
+  return 1;
 }
 
 // CMD: Switches controller to accelerometers report mode.
-void cmdSwitchToAccelReportMode() {
+byte cmdSwitchToAccelReportMode() {
   /* Apparently there is a problem with the way dobot was designed.
    * It is not possible to switch back from SPI Slave to Master.
    * So this code is left in case a proper solution comes up.
@@ -205,23 +318,26 @@ void cmdSwitchToAccelReportMode() {
     FPGA_COMMAND_PORT |= (1<<FPGA_COMMAND_ACCELS_INIT_PIN);
 
     _delay_us(35);
+    serialRead();
 
     // Set SPI as Master.
     SPI_DDR = (1<<SPI_MOSI)|(1<<SPI_SCK)|(1<<SPI_SS);
     SPCR = (1<<SPE)|(1<<MSTR)|(1<<SPR0);
 
     _delay_us(35);
+    serialRead();
 
     // Never return from this function. Only update accelerometers
     // and return their values to the driver.
     // Process next waiting commands in between or else they will time out.
     while (1) {
       accelRear = accelRead(FPGA_COMMAND_ACCEL_REAR_SS_PIN);
-      processCommand();
+      processSerialBuffer();
       accelFront = accelRead(FPGA_COMMAND_ACCEL_FRONT_SS_PIN);
-      processCommand();
+      processSerialBuffer();
     }
   // }
+  return 1;
 }
 
 void serialInit(void) {
@@ -236,27 +352,50 @@ void serialInit(void) {
 
   UCSR0C = _BV(UCSZ01) | _BV(UCSZ00); /* 8-bit data */
   UCSR0B = _BV(RXEN0) | _BV(TXEN0);   /* Enable RX and TX */
-
-//// DEBUG ////
-//   UBRR1H = UBRRH_VALUE;
-//   UBRR1L = UBRRL_VALUE;
-
-// #if USE_2X
-//   UCSR1A |= _BV(U2X1);
-// #else
-//   UCSR1A &= ~(_BV(U2X1));
-// #endif
-
-//   UCSR1C = _BV(UCSZ11) | _BV(UCSZ10); /* 8-bit data */
-//   UCSR1B = _BV(RXEN1) | _BV(TXEN1);   /* Enable RX and TX */
 }
 
-void serialWrite(byte c) {
+void initDebug() {
+#ifdef DEBUG
+  UBRR1H = UBRRH_VALUE;
+  UBRR1L = UBRRL_VALUE;
+#if USE_2X
+  UCSR1A |= _BV(U2X1);
+#else
+  UCSR1A &= ~(_BV(U2X1));
+#endif
+  UCSR1C = _BV(UCSZ11) | _BV(UCSZ10); /* 8-bit data */
+  UCSR1B = _BV(RXEN1) | _BV(TXEN1);   /* Enable RX and TX */
+
+  // DDRD |= (1<<PORTD3);
+#endif
+}
+
+inline void debugPrint(char const *str) {
+#ifdef DEBUG
+  byte i = 0;
+  while (str[i] != 0) {
+    debug(str[i]);
+    i++;
+  }
+  debug(13);
+#endif
+}
+
+inline void debug(byte c) {
+#ifdef DEBUG
+  loop_until_bit_is_set(UCSR1A, UDRE1);
+  UDR1 = c;
+  // PORTD |= (1<<PORTD3);
+  // PORTD &= ~(1<<PORTD3);
+#endif
+}
+
+inline void serialWrite(byte c) {
   loop_until_bit_is_set(UCSR0A, UDRE0);
   UDR0 = c;
 }
 
-void serialWrite(byte data[], byte num) {
+inline void serialWrite(byte data[], byte num) {
   for (byte i = 0; i < num; i++) {
     loop_until_bit_is_set(UCSR0A, UDRE0);
     UDR0 = data[i];
@@ -265,7 +404,7 @@ void serialWrite(byte data[], byte num) {
 
 // Returns number of bytes read or 0 if timeout occurred.
 // Timeout: 1000 increments ~ 600us, so allow about 9ms interbyte and 18ms overall.
-byte serialReadNum(byte data[], byte num) {
+inline byte serialReadNum(byte data[], byte num) {
   unsigned int interByteTimeout = 0;
   unsigned int transactionTimeout = 0;
   byte cnt = 0;
@@ -286,6 +425,15 @@ byte serialReadNum(byte data[], byte num) {
   return cnt;
 }
 
+inline void serialRead() {
+  if (UCSR0A&(1<<RXC0)) {
+    cmd[cmdInBuffIndex] = UDR0;
+    if (cmdInBuffIndex < 19) {
+      cmdInBuffIndex++;
+    }
+  }
+}
+
 uint accelRead(unsigned char pin) {
   byte junk;
   uint result = 0, data;
@@ -294,16 +442,22 @@ uint accelRead(unsigned char pin) {
   junk = SPSR;
   junk = SPDR;
   for (byte i = 0; i < 17; i++) {
+    serialRead();
     _delay_us(770);
+    serialRead();
     FPGA_COMMAND_PORT &= ~(1<<pin);
     SPDR = 0x10;
+    serialRead();
     loop_until_bit_is_set(SPSR, SPIF);
     SPDR = 0x00;
+    serialRead();
     loop_until_bit_is_set(SPSR, SPIF);
     data = SPDR << 8;
     SPDR = 0x00;
+    serialRead();
     loop_until_bit_is_set(SPSR, SPIF);
     data |= SPDR;
+    serialRead();
     // There are only 11 bits accelerometer returns,
     // so take advantage by shifting to prevent sum overflow.
     result += (data >> 5);
@@ -320,6 +474,10 @@ byte read2(byte data[]) {
 
 byte read13(byte data[]) {
   return serialReadNum(data, 13);
+}
+
+void write0() {
+  serialWrite(crc, 2);
 }
 
 void write1(byte data[]) {
@@ -354,9 +512,6 @@ uint16_t dataToUint(byte data[]) {
 }
 
 byte checkCrc(byte data[], int len) {
-  if (!read2(&cmd[len])) {
-    return 0;
-  }
   crcCcitt(cmd, len);
   if (data[len] == crc[0] && data[len + 1] == crc[1]) {
     return 1;
@@ -408,6 +563,7 @@ inline void writeSpiByte(byte data) {
   SPDR = data;
   loop_until_bit_is_set(SPSR, SPIF);
   junk = SPDR;
+  serialRead();
 }
 
 void writeSpi(Command* cmd) {
@@ -436,12 +592,28 @@ int main() {
   while (1) {
     if (SPDR == 0x5a) {
       SPDR = 0x00;
-      if (cmdQueue.isEmpty()) {
+      if (calibrator.isRunning()) {
+        if (calibrator.isHit()) {
+          if (calibrator.isBacking()) {
+            writeSpi(calibrator.getBackoffCommand());
+          } else {
+            calibrator.startBacking();
+            writeSpi(calibrator.getBackoffCommand());
+          }
+        } else if (calibrator.isBacking()) {
+          calibrator.stop();
+          writeSpi((Command*) &sequenceRest[1]);
+        } else {
+          writeSpi(calibrator.getForwardCommand());
+        }
+      } else if (cmdQueue.isEmpty()) {
         writeSpi((Command*) &sequenceRest[1]);
       } else {
         writeSpi(cmdQueue.popTail());
       }
-      processCommand();
+      processSerialBuffer();
+    } else {
+      serialRead();
     }
   }
   return 0;
