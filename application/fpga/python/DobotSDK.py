@@ -33,9 +33,23 @@ from DobotDriver import DobotDriver
 from DobotInverseKinematics import DobotInverseKinematics
 import timeit
 import math
+import matplotlib.pyplot as plt
 
+piHalf = math.pi / 2.0
+piTwo = math.pi * 2.0
+piThreeFourths = math.pi * 3.0 / 4.0
 # calibration-tool.py for details
 accelOffsets = (1024, 1024)
+
+radiansToDegrees = 180.0 / math.pi
+
+lengthRearArm = 135.0
+lengthForearm = 160.0
+# Distance from joint3 to the center of the tool mounted on the end effector.
+distanceTool = 50.9
+heightFromBase = 80.0 + 23.0
+lengthRearSquared = pow(lengthRearArm, 2)
+lengthForeSquared = pow(lengthForearm, 2)
 
 # The NEMA 17 stepper motors that Dobot uses are 200 steps per revolution.
 stepperMotorStepsPerRevolution = 200.0
@@ -53,20 +67,23 @@ rearArmActualStepsPerRevolution = stepperMotorStepsPerRevolution * rearArmMicros
 foreArmActualStepsPerRevolution = stepperMotorStepsPerRevolution * foreArmMicrosteppingMultiplier * stepperPlanetaryGearBoxMultiplier
 
 class Dobot:
-	def __init__(self, port, rate=115200, timeout=0.025, debug=False):
+	def __init__(self, port, rate=115200, timeout=0.025, debug=False, fake=False):
 		self._debugOn = debug
+		self._fake = fake
 		self._driver = DobotDriver(port, rate)
-		self._driver.Open(timeout)
+		if not fake:
+			self._driver.Open(timeout)
 		self._ik = DobotInverseKinematics(debug=debug)
 		# Initialize arms current configuration from accelerometers
-		accels = self._driver.GetAccelerometers()
-		accelRear = accels[1]
-		accelFore = accels[2]
-		rearAngle = math.pi / 2 - self._driver.accelToRadians(accelRear, accelOffsets[0])
-		foreAngle = self._driver.accelToRadians(accelFore, accelOffsets[1])
-		self._baseSteps = long(0)
-		self._rearSteps = long((rearAngle / math.pi / 2.0) * rearArmActualStepsPerRevolution + 0.5)
-		self._foreSteps = long((foreAngle / math.pi / 2.0) * foreArmActualStepsPerRevolution + 0.5)
+		if fake:
+			self._baseSteps = long(0)
+			self._rearSteps = long(0)
+			self._foreSteps = long(0)
+		else:
+			# self._baseSteps = long(0)
+			# self._rearSteps = long(0)
+			# self._foreSteps = long(0)
+			self._initializeAccelerometers()
 
 	def _debug(self, *args):
 		if self._debugOn:
@@ -76,15 +93,37 @@ class Dobot:
 				print arg,
 			print
 
+	def _initializeAccelerometers(self):
+		print "--=========--"
+		accels = self._driver.GetAccelerometers()
+		accelRear = accels[1]
+		accelFore = accels[2]
+		rearAngle = math.pi / 2 - self._driver.accelToRadians(accelRear, accelOffsets[0])
+		foreAngle = self._driver.accelToRadians(accelFore, accelOffsets[1])
+		self._baseSteps = long(0)
+		self._rearSteps = long((rearAngle / math.pi / 2.0) * rearArmActualStepsPerRevolution + 0.5)
+		self._foreSteps = long((foreAngle / math.pi / 2.0) * foreArmActualStepsPerRevolution + 0.5)
+		self._driver.SetCounters(self._baseSteps, self._rearSteps, self._foreSteps)
+		print "Initializing with steps:", self._baseSteps, self._rearSteps, self._foreSteps
+		print "Reading back what was set:", self._driver.GetCounters()
+		currBaseAngle = piTwo * self._baseSteps / baseActualStepsPerRevolution
+		currRearAngle = piHalf - piTwo * self._rearSteps / rearArmActualStepsPerRevolution
+		currForeAngle = piTwo * self._foreSteps / foreArmActualStepsPerRevolution
+		print 'Current estimated coordinates:', self._getCoordinatesFromAngles(currBaseAngle, currRearAngle, currForeAngle)
+		print "--=========--"
+
 	def _moveArmToAngles(self, baseAngle, rearArmAngle, foreArmAngle, duration):
 		self._baseAngle = baseAngle
 		self._rearAngle = rearArmAngle
 		self._foreAngle = foreArmAngle
 		dur = float(duration)
 
-		baseStepLocation = long((baseAngle / 360.0) * baseActualStepsPerRevolution + 0.5)
-		rearArmStepLocation = long((abs(rearArmAngle) / 360.0) * rearArmActualStepsPerRevolution + 0.5)
-		foreArmStepLocation = long((abs(foreArmAngle) / 360.0) * foreArmActualStepsPerRevolution + 0.5)
+		# baseStepLocation = long((baseAngle / 360.0) * baseActualStepsPerRevolution + 0.5)
+		# rearArmStepLocation = long((abs(rearArmAngle) / 360.0) * rearArmActualStepsPerRevolution + 0.5)
+		# foreArmStepLocation = long((abs(foreArmAngle) / 360.0) * foreArmActualStepsPerRevolution + 0.5)
+		baseStepLocation = long(baseAngle * baseActualStepsPerRevolution / piTwo)
+		rearArmStepLocation = long(rearArmAngle * rearArmActualStepsPerRevolution / piTwo)
+		foreArmStepLocation = long(foreArmAngle * foreArmActualStepsPerRevolution / piTwo)
 
 		self._debug("Base Step Location", baseStepLocation)
 		self._debug("Rear Arm Step Location", rearArmStepLocation)
@@ -123,23 +162,262 @@ class Dobot:
 			while ret[0] == 0 or ret[1] == 0:
 				ret = self._driver.Steps(base, rear, fore, baseDir, rearDir, foreDir)
 
-	def _sliceStepsToValues(self, steps, duration):
-		'''
-		@param steps - number of steps to make
-		@param duration - duration that it should take to execute all steps, in seconds
-		'''
-		ret = []
-		num = long(duration / 0.02)
-		chunk = (steps / num)
-		for _ in range(num):
-			ret.append(self._driver.stepsToCmdVal(chunk))
-		return ret
+	def _moveToAnglesSlice(self, baseAngle, rearArmAngle, foreArmAngle, \
+									carryOverStepsBase, carryOverStepsRear, carryOverStepsFore):
+
+		baseStepLocation = baseAngle * baseActualStepsPerRevolution / piTwo
+		rearArmStepLocation = abs(rearArmAngle * rearArmActualStepsPerRevolution / piTwo)
+		foreArmStepLocation = abs(foreArmAngle * foreArmActualStepsPerRevolution / piTwo)
+
+		self._debug("Base Step Location", baseStepLocation)
+		self._debug("Rear Arm Step Location", rearArmStepLocation)
+		self._debug("Forearm Step Location", foreArmStepLocation)
+
+		self._debug('self._baseSteps', self._baseSteps)
+		self._debug('self._rearSteps', self._rearSteps)
+		self._debug('self._foreSteps', self._foreSteps)
+
+		self._debug('carryOverStepsBase', carryOverStepsBase)
+		self._debug('carryOverStepsRear', carryOverStepsRear)
+		self._debug('carryOverStepsFore', carryOverStepsFore)
+		baseDiff = baseStepLocation - self._baseSteps + carryOverStepsBase
+		rearDiff = rearArmStepLocation - self._rearSteps + carryOverStepsRear
+		foreDiff = foreArmStepLocation - self._foreSteps + carryOverStepsFore
+		self._debug('baseDiff', baseDiff)
+		self._debug('rearDiff', rearDiff)
+		self._debug('foreDiff', foreDiff)
+
+		# self._baseSteps = baseStepLocation
+		# self._rearSteps = rearArmStepLocation
+		# self._foreSteps = foreArmStepLocation
+
+		baseSign = 1
+		rearSign = 1
+		foreSign = -1
+		baseDir = 1
+		rearDir = 1
+		foreDir = 1
+
+		if (baseDiff < 1):
+			baseDir = 0
+			baseSign = -1
+		if (rearDiff < 1):
+			rearDir = 0
+			rearSign = -1
+		if (foreDiff > 1):
+			foreDir = 0
+			foreSign = 1
+
+		baseDiffAbs = abs(baseDiff)
+		rearDiffAbs = abs(rearDiff)
+		foreDiffAbs = abs(foreDiff)
+
+		cmdBaseVal, actualStepsBase, leftStepsBase = self._driver.stepsToCmdValFloat(baseDiffAbs)
+		cmdRearVal, actualStepsRear, leftStepsRear = self._driver.stepsToCmdValFloat(rearDiffAbs)
+		cmdForeVal, actualStepsFore, leftStepsFore = self._driver.stepsToCmdValFloat(foreDiffAbs)
+
+		if not self._fake:
+			# Repeat until the command is buffered. May not be buffered if buffer is full.
+			ret = (0, 0)
+			while not ret[1]:
+				ret = self._driver.Steps(cmdBaseVal, cmdRearVal, cmdForeVal, baseDir, rearDir, foreDir)
+
+		return (actualStepsBase * baseSign, actualStepsRear * rearSign, actualStepsFore * foreSign,\
+					leftStepsBase * baseSign, leftStepsRear * rearSign, leftStepsFore * foreSign)
 
 	def freqToCmdVal(self, freq):
 		'''
 		See DobotDriver.freqToCmdVal()
 		'''
 		return self._driver.freqToCmdVal(freq)
+
+	def moveWithSpeed(self, x, y, z, maxSpeed, accel=None):
+		maxVel = float(maxSpeed)
+		xx = float(x)
+		yy = float(y)
+		zz = float(z)
+		
+		accelf = None
+		# Set 100% acceleration if it wasn't provided or exceeds 100%
+		if accel == None or accel > maxVel:
+			accelf = maxVel
+		else:
+			accelf = float(accel)
+
+		print "--=========--"
+		self._debug('maxVel', maxVel)
+		self._debug('accelf', accelf)
+
+		currBaseAngle = piTwo * self._baseSteps / baseActualStepsPerRevolution
+		currRearAngle = piHalf - piTwo * self._rearSteps / rearArmActualStepsPerRevolution
+		currForeAngle = piTwo * self._foreSteps / foreArmActualStepsPerRevolution
+		currX, currY, currZ = self._getCoordinatesFromAngles(currBaseAngle, currRearAngle, currForeAngle)
+
+		vectX = xx - currX
+		vectY = yy - currY
+		vectZ = zz - currZ
+		self._debug('moving from', currX, currY, currZ)
+		self._debug('moving to', xx, yy, zz)
+		self._debug('moving by', vectX, vectY, vectZ)
+
+		distance = math.sqrt(pow(vectX, 2) + pow(vectY, 2) + pow(vectZ, 2))
+		self._debug('distance to travel', distance)
+
+		# If half the distance is reached before reaching maxSpeed with the given acceleration, then actual
+		# maximum velocity will be lower, hence total number of slices is determined from half the distance
+		# and acceleration.
+		distMaxSpeed = pow(maxVel, 2) / (2.0 * accelf)
+		if distMaxSpeed * 2.0 >= distance:
+			accelSlices = math.sqrt(distance / accelf) * 50.0
+			flatSlices = 0
+		# Or else number of slices when velocity does not change is greater than zero.
+		else:
+			accelSlices = maxVel / accelf * 50.0
+			flatSlices = (distance - distMaxSpeed) / maxVel * 50.0
+
+		slices = accelSlices * 2.0 + flatSlices
+		self._debug('slices to do', slices)
+		self._debug('accelSlices', accelSlices)
+		self._debug('flatSlices', flatSlices)
+
+		# Acceleration/deceleration in respective axes
+		accelX = accelf * vectX / distance
+		accelY = accelf * vectY / distance
+		accelZ = accelf * vectZ / distance
+		self._debug('accelXYZ', accelX, accelY, accelZ)
+
+		# Vectors in respective axes to complete acceleration/deceleration
+		segmentAccelX = accelX * pow(accelSlices / 50.0, 2) / 2.0
+		segmentAccelY = accelY * pow(accelSlices / 50.0, 2) / 2.0
+		segmentAccelZ = accelZ * pow(accelSlices / 50.0, 2) / 2.0
+		self._debug('segmentAccelXYZ', segmentAccelX, segmentAccelY, segmentAccelZ)
+
+		maxVelX = maxVel * vectX / distance
+		maxVelY = maxVel * vectY / distance
+		maxVelZ = maxVel * vectZ / distance
+		self._debug('maxVelXYZ', maxVelX, maxVelY, maxVelZ)
+		# Vectors in respective axes in the segment with constant velocity
+		segmentFlatX = maxVelX * flatSlices / 50.0
+		segmentFlatY = maxVelY * flatSlices / 50.0
+		segmentFlatZ = maxVelZ * flatSlices / 50.0
+		self._debug('segmentFlatXYZ', segmentFlatX, segmentFlatY, segmentFlatZ)
+
+		# sliceX = vectX / slices
+		# sliceY = vectY / slices
+		# sliceZ = vectZ / slices
+		# self._debug('slicing by', sliceX, sliceY, sliceZ)
+
+		commands = 1
+		leftStepsBase = 0.0
+		leftStepsRear = 0.0
+		leftStepsFore = 0.0
+		toPlot1 = []
+		toPlot2 = []
+		toPlot3 = []
+		toPlot4 = []
+		toPlot5 = []
+		toPlot6 = []
+		toPlot7 = []
+		toPlot8 = []
+		toPlot9 = []
+		while commands < slices:
+			self._debug('==============================')
+			self._debug('slice #', commands)
+			# If accelerating
+			if commands <= accelSlices:
+				nextX = currX + accelX * pow(commands / 50.0, 2) / 2.0
+				nextY = currY + accelY * pow(commands / 50.0, 2) / 2.0
+				nextZ = currZ + accelZ * pow(commands / 50.0, 2) / 2.0
+			# If decelerating
+			elif commands >= accelSlices + flatSlices:
+				cmd = (slices - commands) / 50.0
+				nextX = currX + segmentAccelX * 2.0 + segmentFlatX - accelX * pow(cmd, 2) / 2.0
+				nextY = currY + segmentAccelY * 2.0 + segmentFlatY - accelY * pow(cmd, 2) / 2.0
+				nextZ = currZ + segmentAccelZ * 2.0 + segmentFlatZ - accelZ * pow(cmd, 2) / 2.0
+			# Or else moving at maxSpeed
+			else:
+				cmd = abs(commands - accelSlices)
+				nextX = currX + segmentAccelX + maxVelX * cmd / 50.0
+				nextY = currY + segmentAccelY + maxVelY * cmd / 50.0
+				nextZ = currZ + segmentAccelZ + maxVelZ * cmd / 50.0
+			self._debug('moving to', nextX, nextY, nextZ)
+
+			'''
+			http://www.learnaboutrobots.com/inverseKinematics.htm
+			'''
+
+			# Radius to the center of the tool.
+			radiusTool = math.sqrt(pow(nextX, 2) + pow(nextY, 2))
+			self._debug('radiusTool', radiusTool)
+			# Radius to joint3.
+			radius = radiusTool - distanceTool
+			self._debug('radius', radius)
+			baseAngle = math.atan2(nextY, nextX)
+			self._debug('ik base angle', baseAngle)
+			# X coordinate of joint3.
+			jointX = radius * math.cos(baseAngle)
+			self._debug('jointX', jointX)
+			# Y coordinate of joint3.
+			jointY = radius * math.sin(baseAngle)
+			self._debug('jointY', jointY)
+			actualZ = nextZ - heightFromBase
+			self._debug('actualZ', actualZ)
+			# Imaginary segment connecting joint1 with joint2, squared.
+			hypotenuseSquared = pow(actualZ, 2) + pow(radius, 2)
+			hypotenuse = math.sqrt(hypotenuseSquared)
+			self._debug('hypotenuse', hypotenuse)
+			self._debug('hypotenuseSquared', hypotenuseSquared)
+
+			q1 = math.atan2(actualZ, radius)
+			self._debug('q1', q1)
+			q2 = math.acos((lengthRearSquared - lengthForeSquared + hypotenuseSquared) / (2.0 * lengthRearArm * hypotenuse))
+			self._debug('q2', q2)
+			rearAngle = piHalf - (q1 + q2)
+			self._debug('ik rear angle', rearAngle)
+			foreAngle = piHalf - (math.acos((lengthRearSquared + lengthForeSquared - hypotenuseSquared) / (2.0 * lengthRearArm * lengthForearm)) - rearAngle)
+			self._debug('ik fore angle', foreAngle)
+
+			movedStepsBase, movedStepsRear, movedStepsFore, leftStepsBase, leftStepsRear, leftStepsFore = \
+				self._moveToAnglesSlice(baseAngle, rearAngle, foreAngle, \
+										leftStepsBase, leftStepsRear, leftStepsFore)
+
+			self._debug('moved', movedStepsBase, movedStepsRear, movedStepsFore, 'steps')
+			self._debug('leftovers', leftStepsBase, leftStepsRear, leftStepsFore)
+
+			commands += 1
+
+			self._baseSteps += movedStepsBase
+			self._rearSteps += movedStepsRear
+			self._foreSteps += movedStepsFore
+
+			# currBaseAngle = piTwo * self._baseSteps / baseActualStepsPerRevolution
+			# currRearAngle = piHalf - piTwo * self._rearSteps / rearArmActualStepsPerRevolution
+			# currForeAngle = piTwo * self._foreSteps / foreArmActualStepsPerRevolution
+			# cX, cY, cZ = self.getCoordinatesFromAngles(currBaseAngle, currRearAngle, currForeAngle)
+			# toPlot1.append(cX)
+			# toPlot2.append(cY)
+			# toPlot3.append(cZ)
+			# toPlot4.append(nextX)
+			# toPlot5.append(nextY)
+			# toPlot6.append(nextZ)
+			# toPlot7.append(cX - nextX)
+			# toPlot8.append(cY - nextY)
+			# toPlot9.append(cZ - nextZ)
+
+		# linewidth = 1.0
+		# plt.subplot(131)
+		# line, = plt.plot(toPlot4, linewidth=linewidth)
+		# line, = plt.plot(toPlot5, linewidth=linewidth)
+		# line, = plt.plot(toPlot6, linewidth=linewidth)
+		# plt.subplot(132)
+		# line, = plt.plot(toPlot1, linewidth=linewidth)
+		# line, = plt.plot(toPlot2, linewidth=linewidth)
+		# line, = plt.plot(toPlot3, linewidth=linewidth)
+		# plt.subplot(133)
+		# line, = plt.plot(toPlot7, linewidth=linewidth)
+		# line, = plt.plot(toPlot8, linewidth=linewidth)
+		# line, = plt.plot(toPlot9, linewidth=linewidth)
+		# plt.show()
 
 	def moveTo(self, x, y, z, duration):
 		'''
@@ -163,38 +441,45 @@ class Dobot:
 		xx = float(x)
 		yy = float(y)
 		zz = float(z)
-		moveToAngles = self._ik.convert_cartesian_coordinate_to_arm_angles(xx, yy, zz)
-		# check that inverse kinematics did not run into a range error.
-		# If it does, it should return -999 for all angles, so check that.
-		if moveToAngles[0] == -999:
-			print 'Unreachable'
-			return
 
-		self._debug('ik base angle', moveToAngles[0])
-		self._debug('ik rear angle', moveToAngles[1])
-		self._debug('ik fore angle', moveToAngles[2])
+		radiansToDegrees = 180.0 / math.pi
 
-		moveToRearArmAngleFloat = moveToAngles[1]
-		moveToForeArmAngleFloat = moveToAngles[2]
+		b = 135.0
+		c = 160.0
+		b2 = pow(b, 2)
+		c2 = pow(c, 2)
 
-		transformedRearArmAngle = 90.0 - moveToRearArmAngleFloat
-		# -90 different from c++ code, accounts for fact that arm starts at the c++ simulation's 90
-		# note that this line is different from the similar line in the move angles function.
-		# Has to do with the inverse kinematics function and the fact that the forearm angle is
-		# calculated relative to the rear arm angle.
-		transformedForeArmAngle = 270.0 + transformedRearArmAngle - moveToForeArmAngleFloat
-		self._debug('transformed rear angle', transformedRearArmAngle)
-		self._debug('transformed fore angle', transformedForeArmAngle)
+		self._debug('============================')
 
-		# check that the final angles are mechanically valid. note that this check only considers final
-		# angles, and not angles while the arm is moving
-		# need to pass in real world angles
-		# real world base and rear arm angles are those returned by the ik function.
-		# real world fore arm angle is -1 * transformedForeArmAngle
-		if not self._ik.check_for_angle_limits_is_valid(moveToAngles[0], moveToAngles[1], -1 * transformedForeArmAngle):
-			return
+		r = math.sqrt(pow(xx, 2) + pow(yy, 2))
+		self._debug('r', r)
+		z2 = zz - (80.0 + 23.0)
+		self._debug('z2', z2)
+		d2 = math.pow(z2, 2) + math.pow(r, 2)
+		d = math.sqrt(d2)
+		self._debug('d', d)
+		self._debug('d2', d2)
 
-		self._moveArmToAngles(moveToAngles[0], transformedRearArmAngle, transformedForeArmAngle, duration)
+		q1 = math.atan2(z2, r)
+		self._debug('q1', q1, q1 * radiansToDegrees)
+		q2 = math.acos((b2 - c2 + d2) / (2.0 * b * d))
+		self._debug('q2', q2, q2 * radiansToDegrees)
+		rearAngle = piHalf - (q1 + q2)
+		self._debug('ik rear angle', rearAngle, rearAngle * radiansToDegrees)
+		foreAngle = piHalf - (math.acos((b2 + c2 - d2) / (2.0 * b * c)) - rearAngle)
+		self._debug('ik fore angle', foreAngle, foreAngle * radiansToDegrees)
+		baseAngle = math.atan2(yy, xx)
+		self._debug('ik base angle', baseAngle, baseAngle * radiansToDegrees)
+
+		self._moveArmToAngles(baseAngle, rearAngle, foreAngle, duration)
+
+	def _getCoordinatesFromAngles(self, baseAngle, rearArmAngle, foreArmAngle):
+		radius = lengthRearArm * math.cos(rearArmAngle) + lengthForearm * math.cos(foreArmAngle) + distanceTool
+		x = radius * math.cos(baseAngle)
+		y = radius * math.sin(baseAngle)
+		z = lengthRearArm * math.sin(rearArmAngle) + heightFromBase - lengthForearm * math.sin(foreArmAngle)
+
+		return (x, y, z)
 
 	def CalibrateJoint(self, joint, forwardCommand, backwardCommand, direction, pin, pinMode, pullup):
 		'''
@@ -208,3 +493,8 @@ class Dobot:
 		'''
 
 		return self._driver.EmergencyStop()
+
+	def LaserOn(self, on):
+		self._driver.LaserOn(on)
+
+

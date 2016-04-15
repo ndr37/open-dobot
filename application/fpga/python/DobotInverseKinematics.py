@@ -42,13 +42,15 @@ default working angle units are radians
 """
 
 #length and height dimensions in mm
-heightFromBase = 80.0
+heightFromBase = 80.0 + 23.0
 lengthRearArm = 135.0
 lengthForeArm = 160.0
+distToTool = 50.9
 
 armSquaredConst = pow(lengthRearArm, 2) + pow(lengthForeArm, 2)
 armDoubledConst = 2.0 * lengthRearArm * lengthForeArm
 radiansToDegrees = 180.0 / math.pi
+degreesToRadians = math.pi / 180.0
 
 class DobotInverseKinematics:
 	def __init__(self, debug=False):
@@ -84,8 +86,7 @@ class DobotInverseKinematics:
 		rearArmAngle = armAngles[0]
 		foreArmAngle = armAngles[1]
 
-		#convert the angles to degrees when you return them
-		return [baseAngle * radiansToDegrees, rearArmAngle * radiansToDegrees, foreArmAngle * radiansToDegrees]
+		return [baseAngle, rearArmAngle, foreArmAngle]
 
 	def get_arm_angles_from_radius_z_coordinate_using_2d_revolute_revolute_inverse_kinematics(self, r, z):
 
@@ -95,10 +96,14 @@ class DobotInverseKinematics:
 		#the two angles are due to the two possible angles, elbow up or down. I always want elbow up.
 		#Not sure which one is elbow up, guessing it's the positive sqrt equation for now. CHECK THIS!
 		#note that pi radians = 180 degrees
-		foreArmAngle = math.pi - math.atan2(math.sqrt(1 - pow(eq, 2)), eq)
+
+		# foreArmAngle = math.pi - math.atan2(math.sqrt(1 - pow(eq, 2)), eq)
+
 		#including the angle two
-		foreArmAngleAlternative = math.pi - math.atan2(-1 * math.sqrt(1 - pow(eq,2)), eq )
-		foreArmAngle = foreArmAngleAlternative
+		# foreArmAngleAlternative = math.pi - math.atan2(-1 * math.sqrt(1 - pow(eq,2)), eq )
+		# foreArmAngle = foreArmAngleAlternative
+
+		foreArmAngle = math.pi - math.atan2(-1 * math.sqrt(1 - pow(eq,2)), eq )
 
 		#note that the rearArmAngle is dependent on the foreArmAngle. This makes sense.
 		# can easily envision that rear arm would be at two different angles if arm is elbow up or down
@@ -131,18 +136,6 @@ class DobotInverseKinematics:
 		distanceToEndPoint = math.sqrt( pow(x,2) + pow(y,2) + pow(z,2) )
 		return distanceToEndPoint
 
-	def get_rear_arm_angle(self):
-		#return the angle in degrees or radians for the rear arm from the accelerometer data and/or known theoretical angle
-		return 45#or radians!
-
-	def get_fore_arm_angle(self):
-		#return the angle in degrees or radians for the forearm from the accelerometer data and/or known theoretical angle
-		return 45#or radians!
-
-	def get_base_angle(self):
-		#return the angle in degrees or radians for the base from the accelerometer data and/or known theoretical angle
-		return 45#or radians!
-
 	# angles passed as arguments here should be real world angles (horizontal = 0, below is negative, above is positive)
 	# i.e. they should be set up the same way as the unit circle is
 	def check_for_angle_limits_is_valid(self, baseAngle, rearArmAngle, foreArmAngle):
@@ -169,34 +162,6 @@ class DobotInverseKinematics:
 
 		return ret
 
-"""
-	# get polar coordinates for the current point
-	# radius is simply given by the base angle
-	# can read the angles from the IMU and empirically determine the radius and angle - I'm using this approach
-	# since it should account for any build up in error, assuming accelerometers are accurate!!!!
-	# alternatively can just use pythagorean thm on theoretical current x,y data
-
-	startRearArmAngle = get_rear_arm_angle
-	startForeArmAngle = get_fore_arm_angle
-	startBaseAngle = get_base_angle
-
-	#could abstract this next bit into a 2D forward kinematics function and then just use the horizontal data returned
-	#only care about the radius, so
-
-
-	currentPosPolarCoordRadius = ???
-	currentPosPolarCoordAngle = currentBaseAngle
-
-
-	#end get polar coordinates
-
-
-def get_radius_in_horizontal_plane_to_cartesian_end_effector_position_using_2d_revolute_revolute_forward_kinematics(rearArmAngle, foreArmAngle, rearArmLength, foreArmLength):
-	#the equation for radius is determined using forward kinematics, just uses socahtoa rules, namely coa here.
-	radius = ( math.cos(rearArmAngle) * rearArmLength ) + ( math.cos(rearArmAngle + foreArmAngle) * foreArmLength )
-	return radius
-
-"""
 
 
 if __name__ == '__main__':
